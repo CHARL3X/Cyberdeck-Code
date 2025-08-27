@@ -212,5 +212,14 @@ def initialize_display_with_fallback(config) -> Optional[ssd1306]:
     if not device:
         print(f"Failed to initialize display at 0x{config.i2c_address:02X}")
         print("Please check connections and I2C configuration")
+    else:
+        # If device is multiplexed, wrap it in MuxSafeOLED
+        if connection_type == 'multiplexed':
+            try:
+                from .mux_safe_oled import MuxSafeOLED
+                device = MuxSafeOLED(device, mux_channel=0)
+                print("Wrapped OLED in multiplexer-safe wrapper")
+            except ImportError:
+                pass  # Continue without wrapper
     
     return device
