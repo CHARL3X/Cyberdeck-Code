@@ -1,0 +1,25 @@
+{
+  "servo_channel": 0,
+  "default_mode": "direct",
+  "modes": {
+    "direct": {
+      "sensitivity": 5.0
+    },
+    "fine": {
+      "sensitivity": 1.0
+    },
+    "range": {
+      "sensitivity": 5.0,
+      "min_angle": 90,
+      "max_angle": 180
+    }
+  },
+  "acceleration": true,
+  "acceleration_threshold": 5,
+  "acceleration_multiplier": 2.0,
+  "min_angle": 0,
+  "max_angle": 270,
+  "center_angle": 250,
+  "smooth_movement": true,
+  "movement_speed": 0.01
+}

@@ -1,0 +1,253 @@
+#!/usr/bin/env python3
+"""
+Screen Tilt Control System
+Controls servo position using rotary encoder with button features
+Based on working gpiozero implementation for Pi 5
+"""
+
+import json
+import time
+import threading
+from pathlib import Path
+from datetime import datetime
+
+from gpiozero import Button
+from adafruit_servokit import ServoKit
+import smbus2
+import board
+import busio
+
+# GPIO Pin Configuration
+ENCODER_CLK = 17
+ENCODER_DT = 27
+ENCODER_SW = 22
+
+# File paths
+CONFIG_FILE = Path(__file__).parent / "config.json"
+STATE_FILE = Path(__file__).parent / "position_state.json"
+
+class ScreenTiltController:
+    """Main controller for screen tilt system"""
+    
+    def __init__(self):
+        self.config = self.load_config()
+        self.state = self.load_state()
+        
+        # Initialize servo with multiplexer support
+        try:
+            # First, select the correct multiplexer channel (channel 1 for PCA9685)
+            mux_bus = smbus2.SMBus(1)
+            mux_address = 0x70
+            mux_bus.write_byte(mux_address, 1 << 1)  # Select channel 1
+            time.sleep(0.01)
+            mux_bus.close()
+            
+            # Now initialize ServoKit which will find PCA9685 on the selected channel
+            self.kit = ServoKit(channels=16, address=0x40)
+            self.servo_channel = self.config['servo_channel']
+            self.kit.servo[self.servo_channel].actuation_range = 270
+            self.kit.servo[self.servo_channel].set_pulse_width_range(500, 2500)
+            print(f"Servo initialized on channel {self.servo_channel} via multiplexer")
+        except Exception as e:
+            print(f"Warning: Could not initialize servo: {e}")
+            print("Running in simulation mode - encoder input will be tracked but no servo movement")
+            self.kit = None
+        
+        # Setup GPIO pins with proper pull-ups
+        self.clk_pin = Button(ENCODER_CLK, pull_up=True, bounce_time=0.01)
+        self.dt_pin = Button(ENCODER_DT, pull_up=True, bounce_time=0.01)
+        self.sw_pin = Button(ENCODER_SW, pull_up=True, bounce_time=0.1)
+        
+        # Control variables
+        self.current_angle = self.state.get('last_position', self.config['center_angle'])
+        self.encoder_pos = 0
+        self.mode = self.state.get('mode', self.config['default_mode'])
+        self.last_clk_state = self.clk_pin.is_pressed
+        
+        # Button handling
+        self.button_press_time = 0
+        self.click_count = 0
+        self.click_timer = None
+        
+        # Set initial position (if servo is connected)
+        if self.kit:
+            self.kit.servo[self.servo_channel].angle = self.current_angle
+        
+        # Attach button handler
+        self.sw_pin.when_pressed = self._button_pressed
+        self.sw_pin.when_released = self._button_released
+        
+        print(f"Screen Tilt Controller initialized")
+        print(f"Mode: {self.mode}, Position: {self.current_angle}°")
+    
+    def load_config(self):
+        """Load or create configuration"""
+        default_config = {
+            "servo_channel": 0,
+            "default_mode": "direct",
+            "modes": {
+                "direct": {"sensitivity": 5.0},  # Increased from 2.0
+                "fine": {"sensitivity": 1.0},
+                "range": {"sensitivity": 5.0, "min_angle": 90, "max_angle": 180}
+            },
+            "acceleration": True,
+            "acceleration_threshold": 5,
+            "acceleration_multiplier": 2.0,
+            "min_angle": 0,
+            "max_angle": 270,
+            "center_angle": 250,
+            "smooth_movement": False,  # Disabled for now
+            "movement_speed": 0.01
+        }
+        
+        if CONFIG_FILE.exists():
+            with open(CONFIG_FILE, 'r') as f:
+                config = json.load(f)
+                # Merge with defaults
+                for key, value in default_config.items():
+                    if key not in config:
+                        config[key] = value
+                return config
+        else:
+            # Save default config
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump(default_config, f, indent=2)
+            return default_config
+    
+    def load_state(self):
+        """Load saved state"""
+        if STATE_FILE.exists():
+            with open(STATE_FILE, 'r') as f:
+                return json.load(f)
+        return {}
+    
+    def save_state(self):
+        """Save current state"""
+        state = {
+            "last_position": self.current_angle,
+            "mode": self.mode,
+            "timestamp": datetime.now().isoformat()
+        }
+        with open(STATE_FILE, 'w') as f:
+            json.dump(state, f, indent=2)
+    
+    def update_servo(self):
+        """Update servo based on encoder position"""
+        # Get sensitivity based on mode
+        if self.mode == "direct":
+            sensitivity = self.config['modes']['direct']['sensitivity']
+        elif self.mode == "fine":
+            sensitivity = self.config['modes']['fine']['sensitivity']
+        elif self.mode == "range":
+            sensitivity = self.config['modes']['range']['sensitivity']
+        else:
+            sensitivity = 5.0
+        
+        # Calculate new angle
+        new_angle = self.config['center_angle'] + (self.encoder_pos * sensitivity)
+        
+        # Apply mode-specific limits
+        if self.mode == "range":
+            range_config = self.config['modes']['range']
+            new_angle = max(range_config['min_angle'], min(range_config['max_angle'], new_angle))
+        else:
+            new_angle = max(self.config['min_angle'], min(self.config['max_angle'], new_angle))
+        
+        # Update if changed
+        if new_angle != self.current_angle:
+            self.current_angle = new_angle
+            if self.kit:
+                self.kit.servo[self.servo_channel].angle = self.current_angle
+            print(f"Position: {self.encoder_pos} → Angle: {self.current_angle}°")
+    
+    def check_encoder(self):
+        """Poll encoder state"""
+        clk_state = self.clk_pin.is_pressed
+        
+        if clk_state != self.last_clk_state and clk_state == False:
+            # CLK went from high to low
+            if self.dt_pin.is_pressed != clk_state:
+                self.encoder_pos += 1
+            else:
+                self.encoder_pos -= 1
+            self.update_servo()
+        
+        self.last_clk_state = clk_state
+    
+    def _button_pressed(self):
+        """Handle button press"""
+        self.button_press_time = time.time()
+    
+    def _button_released(self):
+        """Handle button release"""
+        # Double-check it's really released (not noise)
+        time.sleep(0.05)
+        if not self.sw_pin.is_pressed:
+            press_duration = time.time() - self.button_press_time
+            
+            if press_duration > 1.0:  # Long press
+                self._handle_long_press()
+            else:  # Short press
+                self.click_count += 1
+                
+                # Cancel previous timer
+                if self.click_timer:
+                    self.click_timer.cancel()
+                
+                # Start new timer to detect end of clicks
+                self.click_timer = threading.Timer(0.3, self._process_clicks)
+                self.click_timer.start()
+    
+    def _process_clicks(self):
+        """Process accumulated clicks"""
+        if self.click_count == 1:
+            self._handle_single_click()
+        elif self.click_count == 2:
+            self._handle_double_click()
+        
+        self.click_count = 0
+    
+    def _handle_single_click(self):
+        """Single click - go to home position"""
+        print(f"Going to home position ({self.config['center_angle']}°)")
+        self.encoder_pos = 0
+        self.update_servo()
+    
+    def _handle_double_click(self):
+        """Double click - change mode"""
+        modes = ['direct', 'fine', 'range']
+        current_index = modes.index(self.mode)
+        self.mode = modes[(current_index + 1) % len(modes)]
+        print(f"Mode changed to: {self.mode}")
+        
+        # Reset encoder position when changing modes
+        self.encoder_pos = int((self.current_angle - self.config['center_angle']) / self.config['modes'][self.mode]['sensitivity'])
+    
+    def _handle_long_press(self):
+        """Long press - save position"""
+        self.save_state()
+        print(f"Position saved: {self.current_angle}°")
+    
+    def run(self):
+        """Main run loop"""
+        print("\nControls:")
+        print("- Rotate encoder to tilt screen")
+        print("- Single click: Go to home position")
+        print("- Double click: Change mode (direct → fine → range)")
+        print("- Long press: Save position")
+        print("- Ctrl+C to exit\n")
+        
+        try:
+            while True:
+                self.check_encoder()
+                time.sleep(0.001)  # 1ms polling rate
+                
+        except KeyboardInterrupt:
+            print("\nShutting down...")
+            self.save_state()
+            print("Position saved. Goodbye!")
+
+
+if __name__ == "__main__":
+    controller = ScreenTiltController()
+    controller.run()
