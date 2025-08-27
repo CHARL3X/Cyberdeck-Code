@@ -12,8 +12,12 @@ import time
 
 # Add parent directory and screen_tilt directory to path
 parent_dir = os.path.join(os.path.dirname(__file__), '..')
+servo_dir = os.path.join(parent_dir, 'servo_control', 'screen_tilt')
 sys.path.insert(0, parent_dir)
-sys.path.insert(0, os.path.join(parent_dir, 'servo_control', 'screen_tilt'))
+sys.path.insert(0, servo_dir)
+
+# Change to servo directory for proper file access
+os.chdir(servo_dir)
 
 # Import directly since we added the directory to path
 from screen_tilt_control import ScreenTiltController

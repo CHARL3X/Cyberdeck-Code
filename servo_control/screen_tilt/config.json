@@ -3,13 +3,13 @@
   "default_mode": "direct",
   "modes": {
     "direct": {
-      "sensitivity": 10.0
+      "sensitivity": 5.0
     },
     "fine": {
-      "sensitivity": 2.0
+      "sensitivity": 1.0
     },
     "range": {
-      "sensitivity": 10.0,
+      "sensitivity": 5.0,
       "min_angle": 90,
       "max_angle": 180
     }

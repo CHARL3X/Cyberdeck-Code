@@ -17,6 +17,20 @@ import smbus2
 import board
 import busio
 
+# Try to import servo initialization helpers
+try:
+    from fixed_servo_init import initialize_servo_with_mux, ServoKitWithMux
+    FIXED_SERVO_AVAILABLE = True
+except ImportError:
+    FIXED_SERVO_AVAILABLE = False
+    print("Fixed servo init not available")
+
+try:
+    from mux_aware_servo import MuxAwareServoKit
+    MUX_AWARE_AVAILABLE = True
+except ImportError:
+    MUX_AWARE_AVAILABLE = False
+
 # GPIO Pin Configuration
 ENCODER_CLK = 17
 ENCODER_DT = 27
@@ -35,30 +49,68 @@ class ScreenTiltController:
         
         # Initialize servo with multiplexer support
         self.using_mux = False
-        try:
-            # First, select the correct multiplexer channel (channel 1 for PCA9685)
-            mux_bus = smbus2.SMBus(1)
+        self.kit = None
+        self.mux_servo = None
+        self.fixed_servo = None
+        
+        # Try fixed servo initialization first (most reliable)
+        if FIXED_SERVO_AVAILABLE:
+            try:
+                self.servo_channel = self.config['servo_channel']
+                self.fixed_servo = initialize_servo_with_mux(
+                    mux_channel=1, 
+                    servo_channel=self.servo_channel
+                )
+                if self.fixed_servo:
+                    self.using_mux = True
+                    print(f"✓ Servo ready using fixed mux init")
+                else:
+                    print("Fixed servo init returned None")
+            except Exception as e:
+                print(f"Error with fixed servo init: {e}")
+                self.fixed_servo = None
+        
+        # Try mux-aware initialization if fixed didn't work
+        if not self.fixed_servo and MUX_AWARE_AVAILABLE:
+            try:
+                self.mux_servo = MuxAwareServoKit(mux_channel=1, mux_address=0x70)
+                if self.mux_servo.initialize(retries=5):
+                    self.servo_channel = self.config['servo_channel']
+                    self.mux_servo.configure_servo(
+                        self.servo_channel,
+                        actuation_range=270,
+                        min_pulse=500,
+                        max_pulse=2500
+                    )
+                    self.using_mux = True
+                    print(f"✓ Servo ready on channel {self.servo_channel} via mux-aware wrapper")
+                else:
+                    print("Failed to initialize servo with mux-aware wrapper")
+                    self.mux_servo = None
+            except Exception as e:
+                print(f"Error with mux-aware servo init: {e}")
+                self.mux_servo = None
+        
+        # Fallback to standard approach if mux-aware failed
+        if not self.mux_servo:
             mux_address = 0x70
-            mux_bus.write_byte(mux_address, 1 << 1)  # Select channel 1
-            time.sleep(0.01)
-            mux_bus.close()
-            
-            # Now initialize ServoKit which will find PCA9685 on the selected channel
-            self.kit = ServoKit(channels=16, address=0x40)
-            self.servo_channel = self.config['servo_channel']
-            self.kit.servo[self.servo_channel].actuation_range = 270
-            self.kit.servo[self.servo_channel].set_pulse_width_range(500, 2500)
-            self.using_mux = True
-            print(f"Servo initialized on channel {self.servo_channel} via multiplexer")
-            
-            # Return mux to channel 0 for OLED
-            mux_bus = smbus2.SMBus(1)
-            mux_bus.write_byte(mux_address, 1 << 0)
-            mux_bus.close()
-        except Exception as e:
-            print(f"Warning: Could not initialize servo: {e}")
-            print("Running in simulation mode - encoder input will be tracked but no servo movement")
-            self.kit = None
+            for attempt in range(3):
+                try:
+                    # Try direct connection (no mux)
+                    self.kit = ServoKit(channels=16, address=0x40)
+                    self.servo_channel = self.config['servo_channel']
+                    self.kit.servo[self.servo_channel].actuation_range = 270
+                    self.kit.servo[self.servo_channel].set_pulse_width_range(500, 2500)
+                    print(f"Servo initialized directly (no mux)")
+                    break
+                except Exception as e:
+                    if attempt < 2:
+                        print(f"Direct servo init attempt {attempt + 1} failed: {e}")
+                        time.sleep(0.5)
+                    else:
+                        print(f"Warning: Could not initialize servo: {e}")
+                        print("Running in simulation mode - encoder input will be tracked but no servo movement")
+                        self.kit = None
         
         # Setup GPIO pins with proper pull-ups
         self.clk_pin = Button(ENCODER_CLK, pull_up=True, bounce_time=0.01)
@@ -77,27 +129,15 @@ class ScreenTiltController:
         self.click_timer = None
         
         # Set initial position (if servo is connected)
-        if self.kit:
-            if self.using_mux:
-                try:
-                    # Switch to servo channel
-                    mux_bus = smbus2.SMBus(1)
-                    mux_bus.write_byte(0x70, 1 << 1)
-                    time.sleep(0.01)
-                    mux_bus.close()
-                except:
-                    pass
-            
-            self.kit.servo[self.servo_channel].angle = self.current_angle
-            
-            if self.using_mux:
-                try:
-                    # Switch back to OLED channel
-                    mux_bus = smbus2.SMBus(1)
-                    mux_bus.write_byte(0x70, 1 << 0)
-                    mux_bus.close()
-                except:
-                    pass
+        if self.fixed_servo:
+            self.fixed_servo.set_angle(self.current_angle)
+        elif self.mux_servo:
+            self.mux_servo.set_servo_angle(self.servo_channel, self.current_angle)
+        elif self.kit:
+            try:
+                self.kit.servo[self.servo_channel].angle = self.current_angle
+            except:
+                pass
         
         # Attach button handler
         self.sw_pin.when_pressed = self._button_pressed
@@ -182,27 +222,20 @@ class ScreenTiltController:
         # Update if changed
         if new_angle != self.current_angle:
             self.current_angle = new_angle
-            if self.kit:
-                # If using multiplexer, select channel first
-                if hasattr(self, 'using_mux') and self.using_mux:
-                    try:
-                        bus = smbus2.SMBus(1)
-                        bus.write_byte(0x70, 1 << 1)  # Select channel 1 for servo
-                        bus.close()
-                    except:
-                        pass
-                
-                # Set servo angle
-                self.kit.servo[self.servo_channel].angle = self.current_angle
-                
-                # Reset mux to channel 0 for OLED after servo operation
-                if hasattr(self, 'using_mux') and self.using_mux:
-                    try:
-                        bus = smbus2.SMBus(1)
-                        bus.write_byte(0x70, 1 << 0)  # Return to channel 0 for OLED
-                        bus.close()
-                    except:
-                        pass
+            
+            # Use fixed servo if available (most reliable)
+            if self.fixed_servo:
+                if not self.fixed_servo.set_angle(self.current_angle):
+                    print(f"Failed to set servo angle via fixed wrapper")
+            elif self.mux_servo:
+                if not self.mux_servo.set_servo_angle(self.servo_channel, self.current_angle):
+                    print(f"Failed to set servo angle via mux wrapper")
+            elif self.kit:
+                # Direct servo control (no mux)
+                try:
+                    self.kit.servo[self.servo_channel].angle = self.current_angle
+                except Exception as e:
+                    print(f"Failed to set servo angle: {e}")
             
             print(f"Position: {self.encoder_pos} → Angle: {self.current_angle}°")
     
