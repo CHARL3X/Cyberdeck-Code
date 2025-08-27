@@ -416,9 +416,9 @@ class UnifiedCyberdeckController:
             "servo_channel": 0,
             "default_mode": "direct",
             "modes": {
-                "direct": {"sensitivity": 5.0},
-                "fine": {"sensitivity": 1.0},
-                "range": {"sensitivity": 5.0, "min_angle": 90, "max_angle": 180}
+                "direct": {"sensitivity": 10.0},  # Increased from 5.0 to 10.0
+                "fine": {"sensitivity": 2.0},     # Increased from 1.0 to 2.0
+                "range": {"sensitivity": 10.0, "min_angle": 90, "max_angle": 180}  # Increased
             },
             "min_angle": 0,
             "max_angle": 270,
